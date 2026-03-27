@@ -1,0 +1,340 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+# =============================================================================
+# METADATA DEL PROYECTO
+# =============================================================================
+[project]
+name = "hiperforge-user"
+version = "0.1.0"
+description = "Agente personal de escritorio conversacional — Forge Platform"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "Forge Platform", email = "eng@forgeplatform.io" }]
+keywords = ["agent", "llm", "desktop", "assistant", "forge"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+# =============================================================================
+# DEPENDENCIAS DE PRODUCCIÓN
+# =============================================================================
+dependencies = [
+    # --- LLM Providers ---
+    "openai>=1.35.0",                    # OpenAI SDK v1 (async-first)
+    "anthropic>=0.28.0",                 # Anthropic SDK (Claude)
+
+    # --- HTTP / Networking ---
+    "httpx>=0.27.0",                     # Cliente HTTP async moderno
+    "httpx-sse>=0.4.0",                  # Server-sent events para streaming LLM
+
+    # --- Serialización / Validación ---
+    "pydantic>=2.7.0",                   # Validación de datos con type hints (v2)
+    "pydantic-settings>=2.3.0",          # Gestión de configuración via pydantic
+
+    # --- Storage ---
+    "aiosqlite>=0.20.0",                 # SQLite async para persistencia local
+    "alembic>=1.13.0",                   # Migraciones de esquema de base de datos
+
+    # --- Parsing de documentos ---
+    "pypdf>=4.2.0",                      # Extracción de texto desde PDF
+    "python-docx>=1.1.0",               # Lectura de documentos Word
+    "python-magic>=0.4.27",              # Detección de tipo MIME por magic bytes
+
+    # --- Observabilidad ---
+    "structlog>=24.2.0",                 # Logging estructurado production-grade
+    "opentelemetry-api>=1.25.0",         # Tracing API (OpenTelemetry)
+    "opentelemetry-sdk>=1.25.0",         # Tracing SDK con exporters
+    "opentelemetry-exporter-otlp>=1.25.0", # Exporter OTLP para Jaeger/Grafana
+
+    # --- Utilidades del sistema ---
+    "ulid-py>=1.1.0",                    # ULIDs para IDs ordenables temporalmente
+    "python-dateutil>=2.9.0",            # Parsing robusto de fechas
+    "tzdata>=2024.1",                    # Base de datos de zonas horarias
+
+    # --- Seguridad ---
+    "cryptography>=42.0.0",              # Primitivas criptográficas para secrets
+
+    # --- CLI de depuración (admin) ---
+    "typer>=0.12.0",                     # CLI framework con type hints
+    "rich>=13.7.0",                      # Output enriquecido en terminal
+]
+
+# =============================================================================
+# DEPENDENCIAS OPCIONALES / EXTRAS
+# =============================================================================
+[project.optional-dependencies]
+
+# Modelo local para modo offline
+local-llm = [
+    "ollama>=0.2.0",                     # Cliente para Ollama (llama.cpp local)
+]
+
+# Búsqueda web
+search = [
+    "tavily-python>=0.3.0",             # Tavily Search API (optimizada para LLM)
+]
+
+# Herramientas de desarrollo completas
+dev = [
+    # Testing
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-xdist>=3.5.0",              # Ejecución paralela de tests
+    "pytest-timeout>=2.3.0",            # Timeout por test
+    "hypothesis>=6.103.0",              # Property-based testing
+
+    # Type checking
+    "mypy>=1.10.0",
+    "mypy-extensions>=1.0.0",
+    "types-python-dateutil>=2.9.0",
+    "types-python-magic>=0.4.18",
+
+    # Linting / Formatting
+    "ruff>=0.4.0",                       # Linter + formatter (reemplaza flake8/black/isort)
+    "pyupgrade>=3.16.0",                 # Modernización automática de código Python
+
+    # Security scanning
+    "bandit>=1.7.9",                     # Análisis de seguridad estático
+    "safety>=3.2.0",                     # Verificación de vulnerabilidades en dependencias
+
+    # Debugging / Profiling
+    "icecream>=2.1.3",                   # Debug prints con contexto enriquecido
+    "memray>=1.12.0",                    # Profiling de memoria (Linux/macOS)
+]
+
+# Solo para CI
+ci = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-timeout>=2.3.0",
+    "mypy>=1.10.0",
+    "ruff>=0.4.0",
+    "bandit>=1.7.9",
+    "safety>=3.2.0",
+]
+
+# =============================================================================
+# ENTRY POINTS
+# =============================================================================
+[project.scripts]
+forge-user = "src.bootstrap.startup:main"
+forge-user-debug = "src.interfaces.cli.debug_cli:app"
+
+# =============================================================================
+# CONFIGURACIÓN DE HATCH (build backend)
+# =============================================================================
+[tool.hatch.build.targets.wheel]
+packages = ["forge_core", "src"]
+
+[tool.hatch.build.targets.wheel.sources]
+"forge_core" = "forge_core"
+"src" = "src"
+
+# =============================================================================
+# PYTEST
+# =============================================================================
+[tool.pytest.ini_options]
+minversion = "8.0"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+timeout = 30
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+    "-ra",
+    "--cov=forge_core",
+    "--cov=src",
+    "--cov-report=term-missing",
+    "--cov-report=html:htmlcov",
+    "--cov-report=xml:coverage.xml",
+    "--cov-fail-under=80",
+]
+markers = [
+    "unit: Tests unitarios rápidos sin I/O externo",
+    "integration: Tests de integración con I/O real",
+    "contract: Tests de contrato para puertos/adapters",
+    "e2e: Tests end-to-end del flujo completo",
+    "security: Tests de seguridad y adversariales",
+    "slow: Tests que toman más de 5 segundos",
+    "llm: Tests que requieren acceso real a LLM API",
+    "linux: Tests específicos de plataforma Linux",
+    "windows: Tests específicos de plataforma Windows",
+]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:pydantic.*",
+    "ignore::DeprecationWarning:opentelemetry.*",
+]
+
+# =============================================================================
+# MYPY — verificación estática de tipos
+# =============================================================================
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+check_untyped_defs = true
+no_implicit_optional = true
+show_error_codes = true
+show_column_numbers = true
+error_summary = true
+pretty = true
+
+# Exclusiones justificadas
+[[tool.mypy.overrides]]
+module = [
+    "ulid.*",
+    "magic.*",
+    "docx.*",
+]
+ignore_missing_imports = true
+
+# =============================================================================
+# RUFF — linting y formatting unificado
+# =============================================================================
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["forge_core", "src", "tests"]
+exclude = [
+    ".git",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "htmlcov",
+    "dist",
+    "build",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "SIM",    # flake8-simplify
+    "TCH",    # flake8-type-checking
+    "RUF",    # ruff-specific rules
+    "N",      # pep8-naming
+    "ANN",    # flake8-annotations
+    "S",      # flake8-bandit (security)
+    "PTH",    # flake8-use-pathlib
+    "ASYNC",  # flake8-async
+    "LOG",    # flake8-logging
+    "G",      # flake8-logging-format
+    "TRY",    # tryceratops (exception handling)
+    "PERF",   # perflint
+    "ERA",    # eradicate (comentarios de código muerto)
+]
+ignore = [
+    "ANN101", # missing type annotation for self
+    "ANN102", # missing type annotation for cls
+    "S101",   # use of assert (permitido en tests)
+    "TRY003", # avoid specifying long messages outside exception class
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "ANN", "N", "ERA"]
+"forge_core/testing/**/*.py" = ["S101", "ANN"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["forge_core", "src"]
+force-sort-within-sections = true
+split-on-trailing-comma = true
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+
+# =============================================================================
+# COVERAGE
+# =============================================================================
+[tool.coverage.run]
+source = ["forge_core", "src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/testing/*",
+    "*/__init__.py",
+    "*/migrations/*",
+    "src/bootstrap/startup.py",       # Entry point, cubierto por e2e
+    "src/interfaces/cli/debug_cli.py", # CLI, cubierto por e2e
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __str__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+    "\\.\\.\\.",                       # Ellipsis en protocolos/abstracciones
+]
+show_missing = true
+skip_covered = false
+precision = 2
+
+[tool.coverage.html]
+directory = "htmlcov"
+title = "HiperForge User — Coverage Report"
+
+# =============================================================================
+# BANDIT — análisis de seguridad estático
+# =============================================================================
+[tool.bandit]
+targets = ["forge_core", "src"]
+exclude_dirs = ["tests", "htmlcov", "dist"]
+skips = [
+    "B101",  # assert_used — permitido en código de validación de dominio
+]
+severity = "medium"
+confidence = "medium"
+
+# =============================================================================
+# PYUPGRADE
+# =============================================================================
+[tool.pyupgrade]
+py311-plus = true
