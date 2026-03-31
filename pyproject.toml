@@ -134,7 +134,7 @@ ci = [
 # ENTRY POINTS
 # =============================================================================
 [project.scripts]
-forge-user = "src.bootstrap.startup:main"
+forge-user = "src.bootstrap.startup:run"
 forge-user-debug = "src.interfaces.cli.debug_cli:app"
 
 # =============================================================================

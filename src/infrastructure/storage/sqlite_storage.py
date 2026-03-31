@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -273,18 +274,20 @@ class SQLiteStorageBase:
                 f"No se pudo inicializar la base de datos SQLite en '{self._db_path}': {e}"
             ) from e
 
-    async def _get_conn(self) -> aiosqlite.Connection:
+    @asynccontextmanager
+    async def _get_conn(self) -> Any:
         """
-        Abre una conexión a la base de datos con la configuración correcta.
+        Abre una conexión SQLite configurada y garantiza su cierre.
 
-        Returns:
-            Conexión aiosqlite configurada.
+        Este helper evita reusar indebidamente el mismo objeto connection
+        dentro de context managers, lo que en aiosqlite provoca errores como
+        "threads can only be started once".
         """
-        conn = await aiosqlite.connect(self._db_path)
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("PRAGMA foreign_keys = ON")
-        await conn.execute("PRAGMA journal_mode = WAL")
-        return conn
+        async with aiosqlite.connect(self._db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await conn.execute("PRAGMA journal_mode = WAL")
+            yield conn
 
     @staticmethod
     def _now_iso() -> str:
@@ -328,7 +331,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     async def save_session(self, session: Session) -> None:
         """Persiste el estado del aggregate Session (upsert)."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 now = self._now_iso()
                 await db.execute("""
                     INSERT INTO sessions (
@@ -370,7 +373,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     async def load_session(self, session_id: SessionId) -> Session | None:
         """Carga un aggregate Session completo desde el storage."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT * FROM sessions WHERE session_id = ?",
                     (session_id.to_str(),),
@@ -395,16 +398,16 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
         return Session.restore(
             session_id=SessionId.from_str(row["session_id"]),
             user_id=UserId.from_str(row["user_id"]),
-            status=SessionStatus(row["status"]),
-            turn_count=row["turn_count"],
-            task_count=row["task_count"],
-            artifact_count=row["artifact_count"],
-            current_history_tokens=row["current_history_tokens"],
-            compacted_turns_count=row.get("compacted_turns_count", 0),
-            compaction_summary=row.get("compaction_summary"),
             token_budget=budget,
+            status=SessionStatus(row["status"]),
             created_at=self._parse_dt(row["created_at"]) or datetime.now(tz=timezone.utc),
             last_activity=self._parse_dt(row["last_activity"]) or datetime.now(tz=timezone.utc),
+            turns=[],  # Los turns se cargan posteriormente con load_turns()
+            tasks=[],  # Las tasks se cargan posteriormente
+            artifacts=[],  # Los artifacts se cargan posteriormente
+            compacted_turns_count=row.get("compacted_turns_count", 0),
+            compaction_summary=row.get("compaction_summary"),
+            current_history_tokens=row.get("current_history_tokens", 0),
         )
 
     async def append_turn(
@@ -415,7 +418,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     ) -> None:
         """Añade un turn al historial de la sesión (append-only)."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute("""
                     INSERT OR IGNORE INTO session_turns (
                         turn_id, session_id, sequence_number,
@@ -450,7 +453,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
         """Carga turns de la sesión con paginación."""
         direction = "ASC" if order.lower() == "asc" else "DESC"
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(f"""
                     SELECT * FROM session_turns
                     WHERE session_id = ? AND is_compacted = 0
@@ -470,7 +473,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     ) -> list[dict[str, Any]]:
         """Carga los turns más recientes que caben en el budget de tokens."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 # Cargar todos los turns no compactados en orden descendente
                 async with db.execute("""
                     SELECT * FROM session_turns
@@ -505,7 +508,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     ) -> None:
         """Registra una referencia de tarea en la sesión."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute("""
                     INSERT OR IGNORE INTO session_tasks
                     (task_id, session_id, intent_type, status, created_at)
@@ -528,7 +531,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     ) -> None:
         """Registra una referencia de artifact en la sesión."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute("""
                     INSERT OR IGNORE INTO session_artifacts_ref
                     (artifact_id, session_id, artifact_type, display_name, created_at)
@@ -555,7 +558,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
         """Actualiza el estado de compactación de la sesión."""
         try:
             compacted_ids = [t.to_str() for t in compacted_turn_ids]
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 # Marcar turns como compactados
                 if compacted_ids:
                     placeholders = ",".join("?" * len(compacted_ids))
@@ -620,7 +623,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
         params.extend([query.limit, query.offset])
 
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(sql, params) as cursor:
                     rows = await cursor.fetchall()
 
@@ -658,7 +661,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     async def get_last_active_session(self, user_id: UserId) -> SessionId | None:
         """Retorna el ID de la última sesión activa del usuario."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute("""
                     SELECT session_id FROM sessions
                     WHERE user_id = ? AND status IN ('active', 'paused')
@@ -675,7 +678,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     async def delete_session(self, session_id: SessionId) -> bool:
         """Elimina la sesión y sus turns en cascada."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "DELETE FROM sessions WHERE session_id = ?",
                     (session_id.to_str(),),
@@ -689,7 +692,7 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
     async def count_turns(self, session_id: SessionId) -> int:
         """Cuenta el total de turns de la sesión."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT COUNT(*) FROM session_turns WHERE session_id = ?",
                     (session_id.to_str(),),
@@ -711,7 +714,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     async def save(self, artifact: Artifact) -> None:
         """Persiste un artifact en el storage (INSERT OR IGNORE)."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute("""
                     INSERT OR IGNORE INTO artifacts (
                         artifact_id, session_id, source_task_id, source_turn_id,
@@ -747,7 +750,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     async def load(self, artifact_id: ArtifactId) -> Artifact | None:
         """Carga un artifact completo por su ID."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT * FROM artifacts WHERE artifact_id = ?",
                     (artifact_id.to_str(),),
@@ -799,7 +802,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     async def load_summary(self, artifact_id: ArtifactId) -> ArtifactSummary | None:
         """Carga solo el summary (sin raw_content) de un artifact."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute("""
                     SELECT artifact_id, artifact_type, display_name, session_id,
                            source_task_id, created_at, item_count, source_filename,
@@ -845,7 +848,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     ) -> PaginatedResult[ArtifactSummary]:
         """Lista artifacts de una sesión paginados."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute("""
                     SELECT artifact_id, artifact_type, display_name, session_id,
                            source_task_id, created_at, item_count, source_filename,
@@ -910,7 +913,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
         params.extend([query.limit, query.offset])
 
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(sql, params) as cursor:
                     rows = await cursor.fetchall()
 
@@ -925,7 +928,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     async def delete(self, artifact_id: ArtifactId) -> bool:
         """Elimina un artifact por su ID."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "DELETE FROM artifacts WHERE artifact_id = ?",
                     (artifact_id.to_str(),),
@@ -939,7 +942,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     async def delete_by_session(self, session_id: SessionId) -> int:
         """Elimina todos los artifacts de una sesión."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "DELETE FROM artifacts WHERE session_id = ?",
                     (session_id.to_str(),),
@@ -953,7 +956,7 @@ class SQLiteArtifactStore(SQLiteStorageBase, ArtifactStorePort):
     async def count_by_session(self, session_id: SessionId) -> int:
         """Cuenta los artifacts de una sesión."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT COUNT(*) FROM artifacts WHERE session_id = ?",
                     (session_id.to_str(),),
@@ -975,7 +978,7 @@ class SQLiteAuditLog(SQLiteStorageBase, AuditLogPort):
     async def record(self, entry: AuditEntry) -> None:
         """Registra una entrada inmutable en el audit log."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute("""
                     INSERT OR IGNORE INTO audit_log (
                         entry_id, occurred_at, session_id, event_type,
@@ -1107,7 +1110,7 @@ class SQLiteAuditLog(SQLiteStorageBase, AuditLogPort):
         params.extend([query.limit, query.offset])
 
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(sql, params) as cursor:
                     rows = await cursor.fetchall()
 
@@ -1189,7 +1192,7 @@ class SQLiteAuditLog(SQLiteStorageBase, AuditLogPort):
             params.append(session_id)
 
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     f"SELECT COUNT(*) FROM audit_log WHERE is_security_event = 1 AND {condition}",
                     params,
@@ -1213,7 +1216,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
             # Serializar permissions de forma simplificada (V1)
             perms_dict = {"permissions_version": 1}
 
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 now = self._now_iso()
                 await db.execute("""
                     INSERT INTO user_profiles (
@@ -1244,7 +1247,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     async def load(self, user_id: UserId) -> UserProfile | None:
         """Carga el UserProfile de un usuario."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT * FROM user_profiles WHERE user_id = ?",
                     (user_id.to_str(),),
@@ -1260,7 +1263,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     async def load_default(self) -> UserProfile | None:
         """Carga el perfil por defecto (el primer usuario registrado en V1)."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT * FROM user_profiles ORDER BY created_at ASC LIMIT 1"
                 ) as cursor:
@@ -1294,7 +1297,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     ) -> None:
         """Actualiza solo los permisos del usuario."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "UPDATE user_profiles SET permissions = ?, updated_at = ? WHERE user_id = ?",
                     (self._json_dump(permissions_dict), self._now_iso(), user_id.to_str()),
@@ -1306,7 +1309,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     async def increment_session_count(self, user_id: UserId) -> None:
         """Incrementa atómicamente el contador de sesiones."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "UPDATE user_profiles SET session_count = session_count + 1, updated_at = ? WHERE user_id = ?",
                     (self._now_iso(), user_id.to_str()),
@@ -1318,7 +1321,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     async def add_turns_to_total(self, user_id: UserId, turn_count: int) -> None:
         """Añade turns al contador total atómicamente."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "UPDATE user_profiles SET total_turns = total_turns + ?, updated_at = ? WHERE user_id = ?",
                     (turn_count, self._now_iso(), user_id.to_str()),
@@ -1330,7 +1333,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     async def exists(self, user_id: UserId) -> bool:
         """Verifica si existe un perfil para el usuario."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT 1 FROM user_profiles WHERE user_id = ? LIMIT 1",
                     (user_id.to_str(),),
@@ -1343,7 +1346,7 @@ class SQLiteUserProfileStore(SQLiteStorageBase, UserProfileStorePort):
     async def delete(self, user_id: UserId) -> bool:
         """Elimina el perfil del usuario (irreversible)."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "DELETE FROM user_profiles WHERE user_id = ?",
                     (user_id.to_str(),),
@@ -1407,7 +1410,7 @@ class SQLiteMemoryStore(SQLiteStorageBase):
     async def load_facts(self, user_id: str) -> list[dict]:
         """Carga todos los hechos de largo plazo de un usuario."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 async with db.execute(
                     "SELECT * FROM user_memory_facts WHERE user_id = ? ORDER BY last_accessed_at DESC",
                     (user_id,),
@@ -1420,7 +1423,7 @@ class SQLiteMemoryStore(SQLiteStorageBase):
     async def save_facts(self, user_id: str, facts: list[dict]) -> None:
         """Persiste la lista completa de hechos del usuario (reemplaza los existentes)."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "DELETE FROM user_memory_facts WHERE user_id = ?",
                     (user_id,),
@@ -1451,7 +1454,7 @@ class SQLiteMemoryStore(SQLiteStorageBase):
     async def delete_all_facts(self, user_id: str) -> int:
         """Elimina todos los hechos de un usuario."""
         try:
-            async with await self._get_conn() as db:
+            async with self._get_conn() as db:
                 await db.execute(
                     "DELETE FROM user_memory_facts WHERE user_id = ?",
                     (user_id,),

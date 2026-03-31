@@ -91,15 +91,18 @@ def _make_file_read_schema(base_path: Path) -> ToolSchema:
     return ToolSchema(
         tool_id="file_read",
         display_name="Leer archivo",
+        llm_name="tool_action",
         description=(
             "Lee el contenido de un archivo de texto en el sistema del usuario. "
             "Compatible con .txt, .md, .py, .json, .csv, .yaml y formatos de texto plano."
         ),
         category=ToolCategory.FILESYSTEM,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.LOW,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -132,14 +135,17 @@ def _make_file_list_schema(base_path: Path) -> ToolSchema:
     return ToolSchema(
         tool_id="file_list",
         display_name="Listar directorio",
+        llm_name="tool_action",
         description=(
             "Lista los archivos y subdirectorios de una carpeta del sistema del usuario."
         ),
         category=ToolCategory.FILESYSTEM,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -170,13 +176,16 @@ def _make_file_search_schema(base_path: Path) -> ToolSchema:
     """Busca archivos por nombre o contenido."""
     return ToolSchema(
         tool_id="file_search",
+        llm_name="file_search",
         display_name="Buscar archivos",
         description="Busca archivos por nombre o contenido de texto en el sistema del usuario.",
         category=ToolCategory.FILESYSTEM,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -213,15 +222,18 @@ def _make_file_write_schema(base_path: Path) -> ToolSchema:
     return ToolSchema(
         tool_id="file_write",
         display_name="Escribir archivo",
+        llm_name="tool_action",
         description=(
             "Crea o sobreescribe un archivo de texto en el sistema del usuario. "
             "Requiere aprobación del usuario antes de ejecutarse."
         ),
         category=ToolCategory.FILESYSTEM,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.MEDIUM,
-            mutation_type=MutationType.WRITE,
-            platform=Platform.ALL,
+            mutation_type=MutationType.LOCAL_DATA,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -258,15 +270,18 @@ def _make_web_search_schema() -> ToolSchema:
     return ToolSchema(
         tool_id="web_search",
         display_name="Buscar en la web",
+        llm_name="tool_action",
         description=(
             "Realiza una búsqueda web y retorna los resultados más relevantes "
             "con títulos, URLs y snippets."
         ),
-        category=ToolCategory.SEARCH,
+        category=ToolCategory.RESEARCH,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -299,14 +314,17 @@ def _make_web_fetch_schema() -> ToolSchema:
     return ToolSchema(
         tool_id="web_fetch",
         display_name="Obtener página web",
+        llm_name="tool_action",
         description=(
             "Descarga y extrae el texto de una página web específica."
         ),
-        category=ToolCategory.SEARCH,
+        category=ToolCategory.RESEARCH,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.LOW,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -339,15 +357,18 @@ def _make_flashcard_generate_schema() -> ToolSchema:
     return ToolSchema(
         tool_id="flashcard_generate",
         display_name="Generar flashcards",
+        llm_name="tool_action",
         description=(
             "Genera tarjetas de estudio (pregunta/respuesta) a partir de "
             "texto, notas, o el contenido de un documento."
         ),
         category=ToolCategory.STUDY,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -385,15 +406,18 @@ def _make_quiz_generate_schema() -> ToolSchema:
     return ToolSchema(
         tool_id="quiz_generate",
         display_name="Generar quiz",
+        llm_name="tool_action",
         description=(
             "Genera preguntas de opción múltiple con respuestas correctas e "
             "incorrectas a partir de un texto o tema."
         ),
         category=ToolCategory.STUDY,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -431,15 +455,18 @@ def _make_document_read_schema(base_path: Path) -> ToolSchema:
     return ToolSchema(
         tool_id="document_read",
         display_name="Leer documento",
+        llm_name="tool_action",
         description=(
             "Lee y extrae el texto de documentos PDF, DOCX, PPTX y otros formatos. "
             "Retorna el texto extraído para análisis o resumen."
         ),
         category=ToolCategory.DOCUMENTS,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.LOW,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -472,14 +499,17 @@ def _make_document_summarize_schema() -> ToolSchema:
     return ToolSchema(
         tool_id="document_summarize",
         display_name="Resumir documento",
+        llm_name="tool_action",
         description=(
             "Genera un resumen estructurado y conciso de un texto largo o documento."
         ),
         category=ToolCategory.DOCUMENTS,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={
@@ -521,13 +551,16 @@ def _make_notes_create_schema() -> ToolSchema:
     """Crea una nota de texto estructurada."""
     return ToolSchema(
         tool_id="notes_create",
+        llm_name="notes_create",
         display_name="Crear nota",
         description="Crea una nota o apunte a partir de la conversación o de texto proporcionado.",
         category=ToolCategory.PRODUCTIVITY,
+        llm_description="Perform system actions",
         capability=ToolCapability(
             risk_classification=RiskLevel.NONE,
             mutation_type=MutationType.NONE,
-            platform=Platform.ALL,
+            idempotent=True,
+            platform_support=[Platform.ALL],
             requires_sandbox=False,
         ),
         parameters={

@@ -442,15 +442,7 @@ def _configure_stdlib_logging(config: ObservabilityConfig) -> None:
     # Nivel de log para stdlib
     stdlib_level = _log_level_to_int(config.log_level)
 
-    # Handler que redirige stdlib → structlog
-    structlog_handler = structlog.stdlib.ProcessorFormatter.wrap_for_formatter(
-        foreign_pre_chain=[
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-        ]
-    )
-
-    # Formatter que usa el mismo pipeline structlog
+    # Formatter que usa structlog
     if config.log_format == LogFormat.JSON:
         formatter = structlog.stdlib.ProcessorFormatter(
             processor=structlog.processors.JSONRenderer(),

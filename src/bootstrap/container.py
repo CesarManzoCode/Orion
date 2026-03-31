@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from forge_core.config.schema import ForgeUserConfig, load_config
+from forge_core.config.schema import ForgeUserConfig, LLMProvider, load_config
 from forge_core.observability.logging import get_logger
 
 from src.application.approval.approval_workflow import DefaultApprovalWorkflow
@@ -39,6 +39,7 @@ from src.application.memory.memory_manager import MemoryManager
 from src.application.policy_engine.policy_engine import DefaultPolicyEngine
 from src.application.session.session_manager import SessionManager
 from src.infrastructure.llm.anthropic_adapter import AnthropicAdapter
+from src.infrastructure.llm.openai_adapter import OpenAIAdapter
 from src.infrastructure.storage.sqlite_storage import (
     SQLiteArtifactStore,
     SQLiteAuditLog,
@@ -50,6 +51,7 @@ from src.infrastructure.storage.sqlite_storage import (
 from src.infrastructure.tools.tool_dispatch import DefaultToolDispatch
 from src.infrastructure.tools.tool_registry import InMemoryToolRegistry
 from src.ports.inbound.conversation_port import AdminPort, ConversationPort
+from src.ports.outbound.llm_port import UserLLMPort
 
 
 logger = get_logger(__name__, component="bootstrap")
@@ -75,7 +77,7 @@ class AppContainer:
     memory_store: SQLiteMemoryStore
 
     # --- Infraestructura LLM ---
-    llm_adapter: AnthropicAdapter
+    llm_adapter: UserLLMPort
 
     # --- Infraestructura de tools ---
     tool_registry: InMemoryToolRegistry
@@ -126,10 +128,32 @@ async def build_container(
 
     config = load_config(overrides=config_overrides or {})
 
+    # Determinar configuración LLM según provider.
+    if config.llm.default_provider == LLMProvider.ANTHROPIC:
+        model_name = config.llm.anthropic_model
+        api_key = (
+            config.llm.anthropic_api_key.get_secret_value()
+            if config.llm.anthropic_api_key
+            else None
+        )
+    elif config.llm.default_provider == LLMProvider.OPENAI:
+        model_name = config.llm.openai_model
+        api_key = (
+            config.llm.openai_api_key.get_secret_value()
+            if config.llm.openai_api_key
+            else None
+        )
+    else:  # LOCAL
+        raise ValueError(
+            "El provider LOCAL aún no está implementado en build_container. "
+            "Usa FORGE_USER__LLM__DEFAULT_PROVIDER=anthropic por ahora."
+        )
+
     logger.info(
         "config_cargada",
-        llm_model=config.llm.model,
-        storage_path=config.storage.db_path,
+        llm_provider=config.llm.default_provider.value,
+        llm_model=model_name,
+        storage_path=config.storage.database_path,
         log_level=config.observability.log_level,
     )
 
@@ -137,7 +161,7 @@ async def build_container(
     # 2. STORAGE — SQLite
     # =========================================================================
 
-    db_path = db_path_override or Path(config.storage.db_path).expanduser()
+    db_path = db_path_override or Path(config.storage.database_path).expanduser()
 
     logger.info("storage_inicializando", db_path=str(db_path))
 
@@ -148,23 +172,33 @@ async def build_container(
     logger.info("storage_listo")
 
     # =========================================================================
-    # 3. LLM ADAPTER — Anthropic
+    # 3. LLM ADAPTER — Anthropic (u otro provider)
     # =========================================================================
 
-    api_key = config.llm.api_key.get_secret_value() if config.llm.api_key else None
     if not api_key:
         raise ValueError(
-            "No se encontró la API key de Anthropic. "
-            "Configura FORGE_USER__LLM__API_KEY en las variables de entorno."
+            f"No se encontró la API key para provider '{config.llm.default_provider.value}'. "
+            f"Configura FORGE_USER__LLM__{config.llm.default_provider.value.upper()}_API_KEY."
         )
 
-    llm_adapter = AnthropicAdapter(
-        api_key=api_key,
-        model=config.llm.model or "claude-sonnet-4-5",
-        max_tokens=config.llm.max_tokens or 8_192,
-        timeout_seconds=config.llm.timeout_seconds or 120.0,
-        max_retries=config.llm.max_retries or 3,
-    )
+    if config.llm.default_provider == LLMProvider.ANTHROPIC:
+        llm_adapter = AnthropicAdapter(
+            api_key=api_key,
+            model=model_name,
+            max_tokens=config.llm.max_tokens_response,
+            timeout_seconds=config.llm.request_timeout_seconds,
+            max_retries=config.llm.max_retries,
+            base_url=config.llm.anthropic_base_url,
+        )
+    else:  # OPENAI
+        llm_adapter = OpenAIAdapter(
+            api_key=api_key,
+            model=model_name,
+            max_tokens=config.llm.max_tokens_response,
+            timeout_seconds=config.llm.request_timeout_seconds,
+            max_retries=config.llm.max_retries,
+            base_url=config.llm.openai_base_url,
+        )
 
     logger.info("llm_adapter_listo", model=llm_adapter.model_name)
 
@@ -180,7 +214,7 @@ async def build_container(
 
     policy_engine = DefaultPolicyEngine()
     approval_workflow = DefaultApprovalWorkflow(
-        default_timeout_seconds=config.agent.approval_timeout_seconds or 300.0,
+        default_timeout_seconds=300.0,
     )
 
     logger.info(
@@ -208,7 +242,7 @@ async def build_container(
         profile_store=profile_store,
         audit_log=audit_log,
         default_token_budget=_select_token_budget(llm_adapter.max_context_tokens),
-        inactivity_timeout_minutes=config.agent.session_inactivity_timeout_minutes or 240,
+        inactivity_timeout_minutes=240,
         auto_pause_enabled=True,
     )
 
@@ -219,7 +253,7 @@ async def build_container(
     context_builder = ContextBuilder(
         tool_registry=tool_registry,
         artifact_store=artifact_store,
-        max_artifacts_in_context=config.memory.max_artifacts_in_context or 3,
+        max_artifacts_in_context=3,
     )
 
     memory_manager = MemoryManager(
@@ -228,8 +262,8 @@ async def build_container(
         session_store=session_store,
         memory_store=memory_store,
         profile_store=profile_store,
-        long_term_memory_enabled=config.memory.long_term_memory_enabled,
-        max_long_term_facts=config.memory.max_long_term_facts or 500,
+        long_term_memory_enabled=False,
+        max_long_term_facts=500,
     )
 
     logger.info("servicios_aplicacion_listos")
@@ -248,8 +282,8 @@ async def build_container(
         tool_dispatch=tool_dispatch,
         policy_engine=policy_engine,
         approval_port=approval_workflow,
-        planning_threshold=config.agent.planning_threshold or 2,
-        max_tool_calls_per_turn=config.agent.max_tool_calls_per_turn or 20,
+        planning_threshold=2,
+        max_tool_calls_per_turn=20,
         thinking_indicators_enabled=True,
     )
 

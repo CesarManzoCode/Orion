@@ -48,7 +48,7 @@ from forge_core.errors.types import (
 )
 from forge_core.observability.logging import get_logger
 
-from src.domain.entities.artifact import ArtifactInfo, ArtifactSummary
+from src.domain.entities.artifact import ArtifactSummary
 from src.domain.entities.session import TurnReference
 from src.domain.entities.user_profile import UserProfile
 from src.domain.value_objects.identifiers import (
