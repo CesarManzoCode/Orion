@@ -1,380 +1,296 @@
+#!/usr/bin/env python3
 """
-Debug CLI de HiperForge User.
+CLI interactiva de Orion — agente conversacional.
 
-Interfaz de línea de comandos para administración, diagnóstico y debugging
-del sistema. Accede al AdminPort del sistema para obtener información técnica
-que no está disponible en la UI principal de Tauri.
+Punto de entrada de desarrollo para probar el agente directamente desde
+la terminal sin necesidad de la interfaz Tauri.
 
-Uso:
-    forge-user-debug sessions list
-    forge-user-debug sessions inspect <session_id>
-    forge-user-debug audit query --session <id> --hours 24
-    forge-user-debug tools list
-    forge-user-debug policy status
-    forge-user-debug security report --session <id>
+Diseño de boundaries:
+  Esta CLI solo importa y usa:
+    - build_container() del bootstrap (necesario para construir el sistema)
+    - ConversationPort (el único contrato de entrada permitido para la UI)
+    - Los tipos de request/response del conversation_port
 
-Solo disponible en entornos de desarrollo. No se instala en producción.
+  NO importa directamente:
+    - ConversationCoordinator ni ningún servicio interno
+    - SessionManager ni ningún servicio de aplicación
+    - Entidades del dominio (Session, Task, etc.)
+
+Arranque:
+    python orion_cli.py
+
+O con el entrypoint instalado:
+    forge-user
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
 from pathlib import Path
-from typing import Optional
-
-import typer
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich import print as rprint
-
-from src.bootstrap.container import build_container
 
 
-app = typer.Typer(
-    name="forge-user-debug",
-    help="Debug CLI de administración para HiperForge User.",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
+def _ensure_project_root_in_path() -> None:
+    """
+    Añade el directorio raíz del proyecto al sys.path si no está ya.
+
+    Necesario únicamente cuando se ejecuta el script directamente con
+    `python orion_cli.py` desde el directorio raíz (no desde un entorno
+    instalado con `pip install -e .`).
+
+    Una vez que el proyecto esté instalado correctamente con:
+        pip install -e .
+    este bloque es innecesario y los entrypoints de pyproject.toml
+    manejan el path correctamente.
+    """
+    project_root = Path(__file__).parent.resolve()
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+
+_ensure_project_root_in_path()
+
+
+# Los únicos imports permitidos en una interfaz: bootstrap + puerto de entrada
+from src.bootstrap.container import build_container, AppContainer  # noqa: E402
+from src.ports.inbound.conversation_port import (  # noqa: E402
+    ConversationPort,
+    UserMessageRequest,
+    AssistantResponseType,
+    CreateSessionRequest,
+)
+from src.domain.value_objects.identifiers import UserId, SessionId  # noqa: E402
+from forge_core.errors.types import (  # noqa: E402
+    ForgeStorageError,
+    ForgeLLMError,
+    ForgePolicyError,
 )
 
-sessions_app = typer.Typer(help="Gestión de sesiones.", no_args_is_help=True)
-audit_app = typer.Typer(help="Consulta del audit log.", no_args_is_help=True)
-tools_app = typer.Typer(help="Gestión de tools.", no_args_is_help=True)
-policy_app = typer.Typer(help="Estado del PolicyEngine.", no_args_is_help=True)
-security_app = typer.Typer(help="Reportes de seguridad.", no_args_is_help=True)
 
-app.add_typer(sessions_app, name="sessions")
-app.add_typer(audit_app, name="audit")
-app.add_typer(tools_app, name="tools")
-app.add_typer(policy_app, name="policy")
-app.add_typer(security_app, name="security")
+class OrionCLI:
+    """
+    CLI interactiva de Orion.
 
-console = Console()
+    Solo habla con el ConversationPort — no toca ningún servicio interno.
+    """
 
+    def __init__(self) -> None:
+        self._container: AppContainer | None = None
+        self._port: ConversationPort | None = None
+        self._session_id: str | None = None
+        self._user_id: UserId = UserId.generate()
 
-def _run(coro: Any) -> Any:
-    """Ejecuta una coroutine de forma síncrona para el CLI."""
-    return asyncio.run(coro)
+    # =========================================================================
+    # ARRANQUE
+    # =========================================================================
 
+    async def initialize(self) -> None:
+        """
+        Construye el container y restaura o crea la sesión activa.
 
-async def _get_admin_port() -> Any:
-    """Construye el container y retorna el AdminPort."""
-    container = await build_container()
-    return container.admin_port
+        Intenta restaurar la última sesión del usuario. Si no existe,
+        crea una nueva. El workaround de "siempre crear nueva sesión"
+        fue eliminado — el bug de restauración está corregido en
+        sqlite_storage.py::load_session().
+        """
+        print("\n🚀 Inicializando Orion...")
 
+        self._container = await build_container()
+        self._port = self._container.conversation_port
 
-# =============================================================================
-# SESSIONS
-# =============================================================================
+        session_id = await self._restore_or_create_session()
+        self._session_id = session_id
 
+        print("✅ Orion listo!")
+        print()
+        print("=" * 60)
+        print("  💬  CLI INTERACTIVA DE ORION")
+        print("=" * 60)
+        print("  Escribe 'salir' para terminar | 'help' para comandos")
+        print(f"  Sesión: {self._session_id[:36]}...")
+        print("=" * 60)
+        print()
 
-@sessions_app.command("list")
-def sessions_list(
-    limit: int = typer.Option(20, "--limit", "-n", help="Máximo de sesiones a mostrar."),
-    include_closed: bool = typer.Option(True, "--all/--active", help="Incluir sesiones cerradas."),
-) -> None:
-    """Lista las sesiones del sistema."""
+    async def _restore_or_create_session(self) -> str:
+        """
+        Restaura la última sesión activa o crea una nueva.
 
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        sessions = await admin.get_session_list(limit=limit, include_closed=include_closed)
+        Returns:
+            session_id de la sesión activa como string.
+        """
+        assert self._container is not None
 
-        table = Table(title="Sesiones", show_header=True, header_style="bold cyan")
-        table.add_column("ID", style="dim", width=28)
-        table.add_column("Estado", width=12)
-        table.add_column("Turns", justify="right", width=6)
-        table.add_column("Artifacts", justify="right", width=10)
-        table.add_column("Última actividad", width=22)
-
-        for s in sessions:
-            status_color = {
-                "active": "green",
-                "paused": "yellow",
-                "closed": "dim",
-                "archived": "dim",
-            }.get(s.get("status", ""), "white")
-
-            table.add_row(
-                s.get("session_id", "")[:26] + "..",
-                f"[{status_color}]{s.get('status', '')}[/{status_color}]",
-                str(s.get("turn_count", 0)),
-                str(s.get("artifact_count", 0)),
-                s.get("last_activity", "")[:19],
+        profile = await self._container.profile_store.load_default()
+        if profile is not None:
+            self._user_id = profile.user_id
+            last_session = await self._container.session_manager.get_last_active_session(
+                self._user_id
             )
+            if last_session is not None:
+                print(f"  📂 Sesión restaurada ({last_session.turn_count} turnos previos)")
+                return last_session.session_id.to_str()
 
-        console.print(table)
+        # Crear perfil de usuario por defecto si no existe
+        if profile is None:
+            from src.domain.entities.user_profile import UserProfile
+            profile = UserProfile.create_default()
+            await self._container.profile_store.save(profile)
+            self._user_id = profile.user_id
 
-    _run(_run_async())
+        # Crear nueva sesión
+        request = CreateSessionRequest(user_id=self._user_id)
+        session_id, _ = await self._container.conversation_port.create_session(request)
+        print("  ✨ Nueva sesión creada")
+        return session_id.to_str()
 
+    # =========================================================================
+    # BUCLE PRINCIPAL
+    # =========================================================================
 
-@sessions_app.command("inspect")
-def sessions_inspect(
-    session_id: str = typer.Argument(..., help="ID de la sesión a inspeccionar."),
-) -> None:
-    """Muestra información técnica detallada de una sesión."""
+    async def run(self) -> None:
+        """Bucle interactivo principal."""
+        await self.initialize()
 
-    async def _run_async() -> None:
-        from src.domain.value_objects.identifiers import SessionId
-        admin = await _get_admin_port()
-        info = await admin.inspect_session(SessionId.from_str(session_id))
+        while True:
+            try:
+                user_input = input("Tú: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\n\n👋 Hasta luego!")
+                break
 
-        console.print(Panel(
-            json.dumps(info, indent=2, ensure_ascii=False, default=str),
-            title=f"Sesión: {session_id[:20]}...",
-            border_style="cyan",
-        ))
+            if not user_input:
+                continue
 
-    _run(_run_async())
+            if user_input.lower() in {"salir", "exit", "quit"}:
+                print("\n👋 Hasta luego!")
+                break
+            if user_input.lower() == "help":
+                self._show_help()
+                continue
+            if user_input.lower() == "info":
+                await self._show_info()
+                continue
+            if user_input.lower() == "nueva":
+                await self._new_session()
+                continue
 
+            print("\n⏳ Pensando...\n")
+            response_text = await self._send_message(user_input)
+            if response_text:
+                print(f"Orion: {response_text}\n")
 
-# =============================================================================
-# AUDIT
-# =============================================================================
+    # =========================================================================
+    # MANEJO DE MENSAJES — errores tipados, sin detección por substring
+    # =========================================================================
 
+    async def _send_message(self, user_input: str) -> str:
+        """
+        Envía un mensaje al agente y retorna la respuesta de texto.
 
-@audit_app.command("query")
-def audit_query(
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Filtrar por sesión."),
-    tool_id: Optional[str] = typer.Option(None, "--tool", "-t", help="Filtrar por tool."),
-    last_hours: int = typer.Option(24, "--hours", "-h", help="Últimas N horas."),
-    limit: int = typer.Option(50, "--limit", "-n", help="Máximo de entradas."),
-    security_only: bool = typer.Option(False, "--security", help="Solo eventos de seguridad."),
-) -> None:
-    """Consulta el audit log con filtros."""
+        Captura errores usando la jerarquía de excepciones tipadas del
+        dominio. No detecta errores por contenido del string del mensaje
+        de excepción.
+        """
+        assert self._port is not None
+        assert self._session_id is not None
 
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        entries = await admin.query_audit_log(
-            session_id=session_id,
-            tool_id=tool_id,
-            last_hours=last_hours,
-            limit=limit,
+        request = UserMessageRequest(
+            session_id=SessionId.from_str(self._session_id),
+            message=user_input,
+            attachments=[],
         )
 
-        if security_only:
-            entries = [e for e in entries if e.get("is_security_event")]
+        try:
+            response = await self._port.send_message(request)
 
-        if not entries:
-            console.print("[dim]No se encontraron entradas en el audit log.[/dim]")
-            return
+            if response.response_type == AssistantResponseType.ERROR:
+                return f"⚠️ {response.error_message or 'Error procesando el mensaje.'}"
 
-        table = Table(title="Audit Log", show_header=True, header_style="bold magenta")
-        table.add_column("Timestamp", width=20)
-        table.add_column("Tool", width=20)
-        table.add_column("Decisión", width=16)
-        table.add_column("Riesgo", width=10)
-        table.add_column("OK", width=4)
-        table.add_column("ms", justify="right", width=8)
+            return response.text_content or "(Sin respuesta)"
 
-        for entry in entries:
-            decision = entry.get("policy_decision", "")
-            decision_color = {
-                "allow": "green",
-                "deny": "red",
-                "require_approval": "yellow",
-            }.get(decision, "white")
+        except ForgeStorageError as exc:
+            print(f"  [Storage] {exc}", file=sys.stderr)
+            return "Error temporal del almacenamiento. Por favor intenta de nuevo."
 
-            is_sec = entry.get("is_security_event", False)
-            ok = entry.get("success")
-            ok_str = "[green]✓[/green]" if ok else ("[red]✗[/red]" if ok is False else "-")
+        except ForgeLLMError as exc:
+            print(f"  [LLM] {exc}", file=sys.stderr)
+            return "Error al comunicarse con el modelo. Por favor intenta de nuevo."
 
-            table.add_row(
-                entry.get("occurred_at", "")[:19],
-                f"{'[bold red]' if is_sec else ''}{entry.get('tool_id', '-')[:18]}{'[/bold red]' if is_sec else ''}",
-                f"[{decision_color}]{decision}[/{decision_color}]",
-                entry.get("risk_level", "-"),
-                ok_str,
-                str(round(entry.get("duration_ms") or 0, 1)),
-            )
+        except ForgePolicyError as exc:
+            return f"🔒 Acción no permitida: {exc}"
 
-        console.print(table)
-        console.print(f"[dim]{len(entries)} entradas mostradas[/dim]")
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            return f"❌ Error inesperado ({type(exc).__name__}). Revisa la consola."
 
-    _run(_run_async())
+    # =========================================================================
+    # COMANDOS AUXILIARES
+    # =========================================================================
 
+    def _show_help(self) -> None:
+        print()
+        print("  📖 COMANDOS:")
+        print("     help   — mostrar esta ayuda")
+        print("     info   — información de la sesión actual")
+        print("     nueva  — iniciar una sesión nueva")
+        print("     salir  — terminar")
+        print()
+        print("  💡 EJEMPLOS:")
+        print("     ¿Qué es el teorema de Bayes?")
+        print("     Lista los archivos en ~/Documentos")
+        print("     Genera flashcards sobre fotosíntesis")
+        print()
 
-# =============================================================================
-# TOOLS
-# =============================================================================
+    async def _show_info(self) -> None:
+        """Muestra estadísticas de la sesión activa."""
+        assert self._container is not None
+        assert self._session_id is not None
 
-
-@tools_app.command("list")
-def tools_list(
-    category: Optional[str] = typer.Option(None, "--category", "-c", help="Filtrar por categoría."),
-    include_disabled: bool = typer.Option(False, "--all", help="Incluir tools deshabilitadas."),
-) -> None:
-    """Lista las tools registradas en el sistema."""
-
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        tools = await admin.get_tool_list(
-            category=category,
-            include_disabled=include_disabled,
+        stats = await self._container.session_manager.get_session_stats(
+            SessionId.from_str(self._session_id)
         )
+        print()
+        print("  📊 SESIÓN ACTIVA:")
+        print(f"     ID:          {self._session_id[:36]}")
+        print(f"     Estado:      {stats.get('status', '?')}")
+        print(f"     Turnos:      {stats.get('turn_count', 0)}")
+        print(f"     Tareas:      {stats.get('task_count', 0)}")
+        print(f"     Artifacts:   {stats.get('artifact_count', 0)}")
+        budget = stats.get("token_budget", {})
+        if budget:
+            ratio = budget.get("usage_ratio", 0)
+            print(f"     Contexto:    {ratio:.0%} usado")
+        print()
 
-        table = Table(title="Tools registradas", show_header=True, header_style="bold blue")
-        table.add_column("ID", width=24)
-        table.add_column("Categoría", width=14)
-        table.add_column("Riesgo", width=10)
-        table.add_column("Habilitada", width=10)
-        table.add_column("Saludable", width=10)
-        table.add_column("Invocaciones", justify="right", width=13)
-        table.add_column("Fallos", justify="right", width=8)
+    async def _new_session(self) -> None:
+        """Crea una nueva sesión."""
+        assert self._container is not None
 
-        for t in tools:
-            risk = t.get("risk_level", "NONE")
-            risk_color = {
-                "NONE": "green", "LOW": "cyan", "MEDIUM": "yellow",
-                "HIGH": "red", "CRITICAL": "bold red",
-            }.get(risk, "white")
-
-            table.add_row(
-                t.get("tool_id", ""),
-                t.get("category", ""),
-                f"[{risk_color}]{risk}[/{risk_color}]",
-                "[green]✓[/green]" if t.get("enabled") else "[red]✗[/red]",
-                "[green]✓[/green]" if t.get("healthy") else "[red]✗[/red]",
-                str(t.get("invocations", 0)),
-                str(t.get("failures", 0)),
-            )
-
-        console.print(table)
-
-    _run(_run_async())
+        request = CreateSessionRequest(user_id=self._user_id)
+        session_id, _ = await self._container.conversation_port.create_session(request)
+        self._session_id = session_id.to_str()
+        print(f"  ✨ Nueva sesión: {self._session_id[:36]}")
+        print()
 
 
 # =============================================================================
-# POLICY
+# ENTRY POINT
 # =============================================================================
 
 
-@policy_app.command("status")
-def policy_status() -> None:
-    """Muestra el estado del PolicyEngine y las políticas activas."""
+async def _main() -> int:
+    """Punto de entrada async."""
+    cli = OrionCLI()
+    try:
+        await cli.run()
+        return 0
+    except Exception as exc:
+        import traceback
+        print(f"\n❌ Error fatal: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        return 1
 
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        status = await admin.get_policy_status()
-
-        # Circuit breaker
-        cb = status.get("circuit_breaker", {})
-        cb_status = "[red]ABIERTO[/red]" if cb.get("is_open") else "[green]cerrado[/green]"
-
-        console.print(Panel(
-            f"Circuit breaker: {cb_status}  |  "
-            f"Evaluaciones: [bold]{status.get('total_evaluations', 0)}[/bold]  |  "
-            f"Denials: [bold red]{status.get('total_denials', 0)}[/bold red]  |  "
-            f"Eventos de seguridad: [bold yellow]{status.get('total_security_events', 0)}[/bold yellow]",
-            title="Estado del PolicyEngine",
-            border_style="magenta",
-        ))
-
-        # Políticas activas
-        policies = status.get("policies", [])
-        if policies:
-            table = Table(title="Políticas activas", header_style="bold")
-            table.add_column("Nombre", width=42)
-            table.add_column("Prioridad", justify="right", width=10)
-            table.add_column("Habilitada", width=10)
-
-            for p in sorted(policies, key=lambda x: x.get("priority", 0), reverse=True):
-                table.add_row(
-                    p.get("name", ""),
-                    str(p.get("priority", 0)),
-                    "[green]✓[/green]" if p.get("enabled") else "[red]✗[/red]",
-                )
-            console.print(table)
-
-    _run(_run_async())
-
-
-# =============================================================================
-# SECURITY
-# =============================================================================
-
-
-@security_app.command("report")
-def security_report(
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Sesión específica."),
-) -> None:
-    """Muestra el reporte de seguridad del PolicyEngine."""
-
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        report = await admin.get_security_report(session_id)
-
-        console.print(Panel(
-            json.dumps(report, indent=2, ensure_ascii=False, default=str),
-            title="Reporte de seguridad",
-            border_style="red",
-        ))
-
-    _run(_run_async())
-
-
-@security_app.command("reset")
-def security_reset(
-    session_id: str = typer.Argument(..., help="ID de la sesión a reiniciar."),
-    confirm: bool = typer.Option(False, "--yes", "-y", help="Confirmar sin prompt."),
-) -> None:
-    """Reinicia el contexto de seguridad de una sesión (sale de lockdown)."""
-    if not confirm:
-        typer.confirm(
-            f"¿Reiniciar seguridad de la sesión {session_id[:20]}...?",
-            abort=True,
-        )
-
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        result = await admin.reset_session_security(session_id)
-        console.print(f"[green]✓[/green] {result.get('message', 'Seguridad reiniciada.')}")
-
-    _run(_run_async())
-
-
-# =============================================================================
-# MÉTRICAS GLOBALES
-# =============================================================================
-
-
-@app.command("metrics")
-def metrics() -> None:
-    """Muestra un resumen de métricas globales del sistema."""
-
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        m = await admin.get_metrics_summary()
-
-        console.print(Panel(
-            json.dumps(m, indent=2, ensure_ascii=False, default=str),
-            title="Métricas del sistema",
-            border_style="blue",
-        ))
-
-    _run(_run_async())
-
-
-@app.command("config")
-def show_config() -> None:
-    """Muestra la configuración activa del sistema (sin secrets)."""
-
-    async def _run_async() -> None:
-        admin = await _get_admin_port()
-        cfg = await admin.get_config()
-        console.print(Panel(
-            json.dumps(cfg, indent=2, ensure_ascii=False, default=str),
-            title="Configuración activa",
-            border_style="cyan",
-        ))
-
-    _run(_run_async())
-
-
-# Importación necesaria para el tipo Any en _run
-from typing import Any  # noqa: E402
 
 if __name__ == "__main__":
-    app()
+    sys.exit(asyncio.run(_main()))
