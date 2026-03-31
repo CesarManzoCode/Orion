@@ -322,6 +322,8 @@ class MemoryManager:
         session_manager: SessionManager,
         session_store: SessionStorePort,
         *,
+        memory_store: Any = None,
+        profile_store: Any = None,
         long_term_memory_enabled: bool = True,
         max_long_term_facts: int = _MAX_LONG_TERM_FACTS,
     ) -> None:
@@ -330,16 +332,19 @@ class MemoryManager:
             llm_port:                 Puerto LLM para generar resúmenes.
             session_manager:          SessionManager para persistir compactación.
             session_store:            Store de sesiones para cargar historial.
+            memory_store:             Store SQLite para hechos de largo plazo.
+            profile_store:            Store de perfiles (no usado directamente aquí).
             long_term_memory_enabled: Habilitar memoria a largo plazo.
             max_long_term_facts:      Máximo de hechos a largo plazo.
         """
         self._llm = llm_port
         self._session_manager = session_manager
         self._session_store = session_store
+        self._memory_store = memory_store
         self._long_term_enabled = long_term_memory_enabled
         self._max_facts = max_long_term_facts
 
-        # Stores de largo plazo por usuario (caché en memoria)
+        # Caché en memoria de stores de largo plazo por usuario
         self._user_stores: dict[str, LongTermMemoryStore] = {}
 
     # =========================================================================
@@ -898,9 +903,8 @@ class MemoryManager:
         user_id: UserId,
     ) -> LongTermMemoryStore | None:
         """
-        Obtiene o carga el store de largo plazo del usuario.
+        Obtiene o carga el store de largo plazo del usuario desde SQLite.
 
-        En V1, el store se carga desde una tabla SQLite específica de memoria.
         Se mantiene en caché en memoria durante la vida del MemoryManager.
 
         Args:
@@ -914,16 +918,18 @@ class MemoryManager:
         if user_id_str in self._user_stores:
             return self._user_stores[user_id_str]
 
-        # Crear un nuevo store — en V1 no cargamos de SQLite aún
-        # (la tabla de memoria se implementa en la infraestructura)
         store = LongTermMemoryStore(
             user_id=user_id,
             max_facts=self._max_facts,
         )
 
-        # En la implementación completa, aquí se cargarían los hechos desde SQLite:
-        # facts_data = await self._memory_store.load_facts(user_id)
-        # store.load_from_dicts(facts_data)
+        # Cargar hechos persistidos desde SQLite
+        if self._memory_store is not None:
+            try:
+                facts_data = await self._memory_store.load_facts(user_id_str)
+                store.load_from_dicts(facts_data)
+            except Exception as exc:
+                logger.error("memoria_carga_fallo", user_id=user_id_str, error=str(exc))
 
         self._user_stores[user_id_str] = store
         return store
@@ -936,21 +942,26 @@ class MemoryManager:
         """
         Persiste el store de largo plazo del usuario en SQLite.
 
-        En V1, esto es un placeholder — la persistencia completa se
-        implementa cuando se construye el SQLiteMemoryStore en infraestructura.
-
         Args:
             user_id: ID del usuario.
             store:   Store a persistir.
         """
-        # En la implementación completa:
-        # await self._memory_store.save_facts(user_id, store.to_dicts())
-        # Por ahora, solo loguear que habría persistencia
-        logger.debug(
-            "memoria_largo_plazo_guardada_en_cache",
-            user_id=user_id.to_str(),
-            facts_count=len(store.get_all()),
-        )
+        if self._memory_store is None:
+            return
+
+        try:
+            await self._memory_store.save_facts(user_id.to_str(), store.to_dicts())
+            logger.debug(
+                "memoria_largo_plazo_persistida",
+                user_id=user_id.to_str(),
+                facts_count=len(store.get_all()),
+            )
+        except Exception as exc:
+            logger.error(
+                "memoria_persistencia_fallo",
+                user_id=user_id.to_str(),
+                error=str(exc),
+            )
 
     # =========================================================================
     # MÉTRICAS Y DIAGNÓSTICO

@@ -711,20 +711,96 @@ class _FileWriteExecutor:
 
 
 class _WebSearchExecutor:
-    """Ejecutor para web_search — stub en V1 (requiere API key de búsqueda)."""
+    """Ejecutor para web_search usando DuckDuckGo (sin API key requerida)."""
 
     async def execute(self, tool_input: Any) -> Any:
         from forge_core.tools.protocol import ToolOutput
+        import json
+        import re
+        import urllib.parse
+        import urllib.request
+
         query = tool_input.arguments.get("query", "")
-        # En V1, retorna un mensaje indicando que se necesita configurar la API
-        return ToolOutput.success(
-            content=(
-                f"Búsqueda web para: '{query}'\n\n"
-                "Esta función requiere configurar una API de búsqueda (SerpAPI, Brave, etc.). "
-                "Configura FORGE_USER__SEARCH__API_KEY para habilitarla."
-            ),
-            metadata={"query": query, "stub": True},
-        )
+        max_results = tool_input.arguments.get("max_results", 10)
+
+        try:
+            results: list[dict] = []
+
+            # 1. DuckDuckGo Instant Answer API (respuesta directa)
+            encoded = urllib.parse.quote_plus(query)
+            url = (
+                f"https://api.duckduckgo.com/?q={encoded}"
+                f"&format=json&no_redirect=1&no_html=1&skip_disambig=1"
+            )
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Mozilla/5.0 (compatible; ForgeUser/1.0)"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            if data.get("Abstract"):
+                results.append({
+                    "title": data.get("Heading", query),
+                    "url": data.get("AbstractURL", ""),
+                    "snippet": data["Abstract"],
+                    "source": data.get("AbstractSource", "DuckDuckGo"),
+                })
+
+            for topic in data.get("RelatedTopics", []):
+                if len(results) >= max_results:
+                    break
+                if isinstance(topic, dict) and topic.get("Text"):
+                    results.append({
+                        "title": topic["Text"][:100],
+                        "url": topic.get("FirstURL", ""),
+                        "snippet": topic["Text"],
+                        "source": "DuckDuckGo",
+                    })
+
+            # 2. Fallback HTML si no hay resultados suficientes
+            if len(results) < 3:
+                html_url = f"https://html.duckduckgo.com/html/?q={encoded}"
+                req2 = urllib.request.Request(
+                    html_url,
+                    headers={"User-Agent": "Mozilla/5.0 (compatible; ForgeUser/1.0)"},
+                )
+                with urllib.request.urlopen(req2, timeout=10) as resp2:
+                    html = resp2.read().decode("utf-8", errors="replace")
+
+                links = re.findall(
+                    r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                    html, re.DOTALL
+                )
+                snippets = re.findall(
+                    r'class="result__snippet">(.*?)</span>',
+                    html, re.DOTALL
+                )
+
+                for i, (href, title_html) in enumerate(links[:max_results]):
+                    if len(results) >= max_results:
+                        break
+                    clean_title = re.sub(r"<[^>]+>", "", title_html).strip()
+                    clean_snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip() if i < len(snippets) else ""
+                    # DuckDuckGo HTML encode las URLs
+                    if "uddg=" in href:
+                        real_url = urllib.parse.unquote(href.split("uddg=")[-1].split("&")[0])
+                    else:
+                        real_url = href
+                    if clean_title and real_url.startswith("http"):
+                        results.append({
+                            "title": clean_title,
+                            "url": real_url,
+                            "snippet": clean_snippet,
+                            "source": "DuckDuckGo",
+                        })
+
+            return ToolOutput.success(
+                content=json.dumps(results[:max_results], ensure_ascii=False, indent=2),
+                metadata={"query": query, "results_count": len(results[:max_results])},
+            )
+
+        except Exception as exc:
+            return ToolOutput.error(f"Error en la búsqueda web: {exc}")
 
 
 class _WebFetchExecutor:
@@ -762,7 +838,7 @@ class _WebFetchExecutor:
 
 
 class _FlashcardGenerateExecutor:
-    """Ejecutor para flashcard_generate — delega al LLM via prompt estructurado."""
+    """Ejecutor para flashcard_generate."""
 
     async def execute(self, tool_input: Any) -> Any:
         from forge_core.tools.protocol import ToolOutput
@@ -771,20 +847,17 @@ class _FlashcardGenerateExecutor:
         difficulty = tool_input.arguments.get("difficulty", "intermediate")
         language = tool_input.arguments.get("language", "es")
 
-        # Retorna instrucción para que el LLM genere las flashcards
-        # El ConversationCoordinator procesa esto como un artifact
-        import json
-        prompt_result = {
-            "instruction": "generate_flashcards",
-            "content_preview": content[:500],
-            "count": count,
-            "difficulty": difficulty,
-            "language": language,
-            "status": "pending_llm_generation",
-        }
+        # Construir prompt para el LLM de síntesis
+        prompt = (
+            f"Genera exactamente {count} flashcards de nivel {difficulty} "
+            f"en {language} basándote en el siguiente contenido.\n\n"
+            f"FORMATO REQUERIDO — responde ÚNICAMENTE con JSON válido, sin texto adicional:\n"
+            f'[{{"front": "pregunta", "back": "respuesta"}}, ...]\n\n'
+            f"CONTENIDO:\n{content[:8000]}"
+        )
         return ToolOutput.success(
-            content=json.dumps(prompt_result, ensure_ascii=False),
-            metadata={"count": count, "difficulty": difficulty},
+            content=prompt,
+            metadata={"count": count, "difficulty": difficulty, "tool_action": "flashcard_generate"},
         )
 
 
@@ -793,21 +866,20 @@ class _QuizGenerateExecutor:
 
     async def execute(self, tool_input: Any) -> Any:
         from forge_core.tools.protocol import ToolOutput
-        import json
         content = tool_input.arguments.get("content", "")
         question_count = tool_input.arguments.get("question_count", 10)
         options = tool_input.arguments.get("options_per_question", 4)
 
-        result = {
-            "instruction": "generate_quiz",
-            "content_preview": content[:500],
-            "question_count": question_count,
-            "options_per_question": options,
-            "status": "pending_llm_generation",
-        }
+        prompt = (
+            f"Genera exactamente {question_count} preguntas de opción múltiple "
+            f"con {options} opciones cada una.\n\n"
+            f"FORMATO REQUERIDO — responde ÚNICAMENTE con JSON válido:\n"
+            f'[{{"question": "...", "options": ["a","b","c","d"], "correct_index": 0, "explanation": "..."}}]\n\n'
+            f"CONTENIDO:\n{content[:8000]}"
+        )
         return ToolOutput.success(
-            content=json.dumps(result, ensure_ascii=False),
-            metadata={"question_count": question_count},
+            content=prompt,
+            metadata={"question_count": question_count, "tool_action": "quiz_generate"},
         )
 
 
@@ -875,24 +947,25 @@ class _DocumentSummarizeExecutor:
 
     async def execute(self, tool_input: Any) -> Any:
         from forge_core.tools.protocol import ToolOutput
-        import json
         content = tool_input.arguments.get("content", "")
         style = tool_input.arguments.get("style", "paragraph")
         max_length = tool_input.arguments.get("max_length", "medium")
         language = tool_input.arguments.get("language", "es")
 
-        result = {
-            "instruction": "summarize",
-            "content_preview": content[:500],
-            "content_length": len(content),
-            "style": style,
-            "max_length": max_length,
-            "language": language,
-            "status": "pending_llm_generation",
+        length_map = {"short": "200 palabras", "medium": "500 palabras", "long": "1000 palabras"}
+        style_map = {
+            "paragraph": "párrafos continuos",
+            "bullet_points": "lista de puntos clave con viñetas",
+            "outline": "esquema jerárquico con secciones y subsecciones",
         }
+        prompt = (
+            f"Resume el siguiente texto en {language} usando formato de {style_map.get(style, style)}. "
+            f"Longitud máxima: {length_map.get(max_length, max_length)}.\n\n"
+            f"TEXTO:\n{content[:12000]}"
+        )
         return ToolOutput.success(
-            content=json.dumps(result, ensure_ascii=False),
-            metadata={"style": style, "max_length": max_length},
+            content=prompt,
+            metadata={"style": style, "max_length": max_length, "tool_action": "document_summarize"},
         )
 
 

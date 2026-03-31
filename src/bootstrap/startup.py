@@ -51,10 +51,6 @@ async def register_builtin_tools(container: AppContainer) -> int:
     """
     Registra las tools built-in del agente en el ToolRegistry.
 
-    Las tools se cargan desde el módulo de infraestructura de tools.
-    Se registran después de construir el container para poder inyectar
-    dependencias (como el path de acceso permitido del usuario).
-
     Args:
         container: AppContainer completamente inicializado.
 
@@ -71,12 +67,7 @@ async def register_builtin_tools(container: AppContainer) -> int:
     registered = 0
     for tool_schema in tools:
         try:
-            container.session_store.tool_registry if hasattr(container.session_store, 'tool_registry') else None
-            container.llm_adapter  # solo para verificar que el container está listo
-            # Registrar en el registry (acceso directo al registry desde container)
-            from src.infrastructure.tools.tool_registry import InMemoryToolRegistry
-            # El tool_registry está en el coordinator — accedemos via el admin port
-            # En producción, el registry se inyecta en el container directamente
+            container.tool_registry.register(tool_schema)
             registered += 1
         except Exception as exc:
             logger.warning(

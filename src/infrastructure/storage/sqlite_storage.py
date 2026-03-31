@@ -208,6 +208,22 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS user_memory_facts (
+    fact_id             TEXT PRIMARY KEY,
+    user_id             TEXT NOT NULL,
+    content             TEXT NOT NULL,
+    category            TEXT NOT NULL DEFAULT 'general',
+    source_session_id   TEXT NOT NULL DEFAULT '',
+    tags                TEXT NOT NULL DEFAULT '[]',
+    confidence          REAL NOT NULL DEFAULT 1.0,
+    access_count        INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    last_accessed_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_user
+    ON user_memory_facts (user_id, last_accessed_at DESC);
 """
 
 
@@ -1344,6 +1360,7 @@ async def create_sqlite_stores(db_path: str | Path) -> tuple[
     SQLiteArtifactStore,
     SQLiteAuditLog,
     SQLiteUserProfileStore,
+    SQLiteMemoryStore,
 ]:
     """
     Factory: crea e inicializa los 4 stores SQLite desde una ruta de BD.
@@ -1365,6 +1382,7 @@ async def create_sqlite_stores(db_path: str | Path) -> tuple[
     artifact_store = SQLiteArtifactStore(db_path)
     audit_log = SQLiteAuditLog(db_path)
     profile_store = SQLiteUserProfileStore(db_path)
+    memory_store = SQLiteMemoryStore(db_path)
 
     # Inicializar solo una vez (todos comparten la misma BD)
     await session_store.initialize()
@@ -1372,5 +1390,74 @@ async def create_sqlite_stores(db_path: str | Path) -> tuple[
     artifact_store._initialized = True
     audit_log._initialized = True
     profile_store._initialized = True
+    memory_store._initialized = True
 
-    return session_store, artifact_store, audit_log, profile_store
+    return session_store, artifact_store, audit_log, profile_store, memory_store
+
+
+class SQLiteMemoryStore(SQLiteStorageBase):
+    """
+    Implementación SQLite del store de memoria a largo plazo del usuario.
+
+    Persiste y recupera LongTermFact entre sesiones.
+    Implementación simple y eficiente: todos los hechos del usuario se
+    cargan en una sola query y se mantienen en memoria durante la sesión.
+    """
+
+    async def load_facts(self, user_id: str) -> list[dict]:
+        """Carga todos los hechos de largo plazo de un usuario."""
+        try:
+            async with await self._get_conn() as db:
+                async with db.execute(
+                    "SELECT * FROM user_memory_facts WHERE user_id = ? ORDER BY last_accessed_at DESC",
+                    (user_id,),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            raise ForgeStorageError(f"Error al cargar hechos de memoria: {e}") from e
+
+    async def save_facts(self, user_id: str, facts: list[dict]) -> None:
+        """Persiste la lista completa de hechos del usuario (reemplaza los existentes)."""
+        try:
+            async with await self._get_conn() as db:
+                await db.execute(
+                    "DELETE FROM user_memory_facts WHERE user_id = ?",
+                    (user_id,),
+                )
+                for fact in facts:
+                    await db.execute("""
+                        INSERT INTO user_memory_facts (
+                            fact_id, user_id, content, category,
+                            source_session_id, tags, confidence,
+                            access_count, created_at, last_accessed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        fact["fact_id"],
+                        user_id,
+                        fact["content"],
+                        fact.get("category", "general"),
+                        fact.get("source_session_id", ""),
+                        self._json_dump(fact.get("tags", [])),
+                        fact.get("confidence", 1.0),
+                        fact.get("access_count", 0),
+                        fact.get("created_at", self._now_iso()),
+                        fact.get("last_accessed_at", self._now_iso()),
+                    ))
+                await db.commit()
+        except Exception as e:
+            raise ForgeStorageError(f"Error al guardar hechos de memoria: {e}") from e
+
+    async def delete_all_facts(self, user_id: str) -> int:
+        """Elimina todos los hechos de un usuario."""
+        try:
+            async with await self._get_conn() as db:
+                await db.execute(
+                    "DELETE FROM user_memory_facts WHERE user_id = ?",
+                    (user_id,),
+                )
+                count = db.total_changes
+                await db.commit()
+            return count
+        except Exception as e:
+            raise ForgeStorageError(f"Error al eliminar hechos de memoria: {e}") from e

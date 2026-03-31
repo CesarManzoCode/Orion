@@ -510,12 +510,8 @@ class ContextBuilder:
         Returns:
             Número de turns que caben (desde el más reciente).
         """
-        allocation = session._token_budget.compute_allocation(
-            active_tools_token_estimate=self._tool_registry.estimate_schemas_token_count(
-                self._platform,
-                profile.permissions if hasattr(session, '_profile') else None,
-            ) if False else None  # sin profile aquí
-        )
+        # Usar solo el budget base sin tools — profile no está disponible aquí
+        allocation = session._token_budget.compute_allocation()
 
         turns_with_tokens = [
             (i, TokenEstimator.estimate_message(

@@ -5,23 +5,18 @@ El container es el único lugar en todo el sistema donde se instancian
 las implementaciones concretas y se conectan a sus puertos abstractos.
 Este es el «composition root» de la arquitectura hexagonal.
 
-Principio:
-  Toda la lógica de negocio depende de abstracciones (puertos).
-  El container conecta las abstracciones con las implementaciones concretas.
-  Solo el container conoce ambos lados — nadie más.
-
 Orden de construcción (respeta las dependencias):
   1. Configuración (desde env vars + archivo TOML)
   2. Storage (SQLite stores)
   3. LLM adapter (Anthropic)
-  4. Tool registry (vacío, herramientas se registran después)
+  4. Tool registry (vacío — las tools se registran en startup.py después)
   5. Policy engine + Approval workflow
-  6. Servicios de aplicación (SessionManager, MemoryManager, etc.)
-  7. ConversationCoordinator (orquestador principal)
-  8. ConversationAdminPort (para el debug CLI)
+  6. Tool dispatch (requiere policy engine ya construido)
+  7. Servicios de aplicación
+  8. ConversationCoordinator
+  9. AdminPort
 
 El container es un dataclass inmutable después de construirse.
-La construcción es async porque el storage necesita initialize().
 """
 
 from __future__ import annotations
@@ -47,10 +42,13 @@ from src.infrastructure.llm.anthropic_adapter import AnthropicAdapter
 from src.infrastructure.storage.sqlite_storage import (
     SQLiteArtifactStore,
     SQLiteAuditLog,
+    SQLiteMemoryStore,
     SQLiteSessionStore,
     SQLiteUserProfileStore,
     create_sqlite_stores,
 )
+from src.infrastructure.tools.tool_dispatch import DefaultToolDispatch
+from src.infrastructure.tools.tool_registry import InMemoryToolRegistry
 from src.ports.inbound.conversation_port import AdminPort, ConversationPort
 
 
@@ -62,12 +60,8 @@ class AppContainer:
     """
     Contenedor de todas las dependencias del sistema.
 
-    Es el registro central de servicios. Todos los servicios son
-    singletons — una instancia por proceso. El container se crea
-    una vez al arrancar y se pasa a los entry points (Tauri, CLI).
-
-    Inmutable después de construirse: los servicios no se reemplazan
-    en runtime. Para cambiar configuración, se reinicia el proceso.
+    Todos los servicios son singletons — una instancia por proceso.
+    Inmutable después de construirse.
     """
 
     # --- Configuración ---
@@ -78,9 +72,14 @@ class AppContainer:
     artifact_store: SQLiteArtifactStore
     audit_log: SQLiteAuditLog
     profile_store: SQLiteUserProfileStore
+    memory_store: SQLiteMemoryStore
 
     # --- Infraestructura LLM ---
     llm_adapter: AnthropicAdapter
+
+    # --- Infraestructura de tools ---
+    tool_registry: InMemoryToolRegistry
+    tool_dispatch: DefaultToolDispatch
 
     # --- Servicios de aplicación ---
     policy_engine: DefaultPolicyEngine
@@ -107,10 +106,6 @@ async def build_container(
 ) -> AppContainer:
     """
     Construye el contenedor de dependencias del sistema.
-
-    Inicializa todos los servicios en el orden correcto respetando
-    el grafo de dependencias. Es async porque el storage necesita
-    crear las tablas SQLite.
 
     Args:
         config_overrides:  Overrides de configuración (útil para tests).
@@ -146,7 +141,7 @@ async def build_container(
 
     logger.info("storage_inicializando", db_path=str(db_path))
 
-    session_store, artifact_store, audit_log, profile_store = (
+    session_store, artifact_store, audit_log, profile_store, memory_store = (
         await create_sqlite_stores(db_path)
     )
 
@@ -174,16 +169,10 @@ async def build_container(
     logger.info("llm_adapter_listo", model=llm_adapter.model_name)
 
     # =========================================================================
-    # 4. TOOL REGISTRY — construido vacío, las tools se registran en startup.py
+    # 4. TOOL REGISTRY — vacío; startup.py llama register_builtin_tools()
     # =========================================================================
 
-    from src.infrastructure.tools.tool_registry import InMemoryToolRegistry
     tool_registry = InMemoryToolRegistry()
-
-    from src.infrastructure.tools.tool_dispatch import DefaultToolDispatch
-    # El dispatch se crea sin policy engine aún (se inyecta después)
-    # Para romper la dependencia circular, usamos un placeholder que se configura en startup
-    tool_dispatch_placeholder: Any = None
 
     # =========================================================================
     # 5. POLICY ENGINE + APPROVAL WORKFLOW
@@ -200,7 +189,7 @@ async def build_container(
     )
 
     # =========================================================================
-    # 6. TOOL DISPATCH (ahora con policy engine listo)
+    # 6. TOOL DISPATCH
     # =========================================================================
 
     tool_dispatch = DefaultToolDispatch(
@@ -237,6 +226,8 @@ async def build_container(
         llm_port=llm_adapter,
         session_manager=session_manager,
         session_store=session_store,
+        memory_store=memory_store,
+        profile_store=profile_store,
         long_term_memory_enabled=config.memory.long_term_memory_enabled,
         max_long_term_facts=config.memory.max_long_term_facts or 500,
     )
@@ -244,7 +235,7 @@ async def build_container(
     logger.info("servicios_aplicacion_listos")
 
     # =========================================================================
-    # 8. CONVERSATION COORDINATOR (orquestador principal)
+    # 8. CONVERSATION COORDINATOR
     # =========================================================================
 
     coordinator = ConversationCoordinator(
@@ -263,7 +254,7 @@ async def build_container(
     )
 
     # =========================================================================
-    # 9. ADMIN PORT (para el debug CLI)
+    # 9. ADMIN PORT
     # =========================================================================
 
     admin_port = ConversationAdminPort(
@@ -283,6 +274,9 @@ async def build_container(
         audit_log=audit_log,
         profile_store=profile_store,
         llm_adapter=llm_adapter,
+        memory_store=memory_store,
+        tool_registry=tool_registry,
+        tool_dispatch=tool_dispatch,
         policy_engine=policy_engine,
         approval_workflow=approval_workflow,
         session_manager=session_manager,
@@ -294,16 +288,8 @@ async def build_container(
     )
 
 
-def _select_token_budget(context_window: int):
-    """
-    Selecciona el ContextTokenBudget apropiado según el context window del modelo.
-
-    Args:
-        context_window: Context window del modelo activo en tokens.
-
-    Returns:
-        ContextTokenBudget configurado para ese context window.
-    """
+def _select_token_budget(context_window: int) -> Any:
+    """Selecciona el ContextTokenBudget según el context window del modelo."""
     from src.domain.value_objects.token_budget import (
         BUDGET_8K,
         BUDGET_32K,
