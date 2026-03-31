@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from forge_core.observability.logging import get_logger, setup_logging
+from forge_core.observability.logging import configure_logging, get_logger
 
 from src.bootstrap.container import AppContainer, build_container
 
@@ -532,10 +532,11 @@ async def main() -> int:
         Código de salida (0=ok, 1=error).
     """
     # 1. Configurar logging lo antes posible
-    setup_logging(
-        log_level="INFO",
-        format="json" if not sys.stdout.isatty() else "console",
-    )
+    from forge_core.config.schema import LogFormat, LogLevel, ObservabilityConfig
+    configure_logging(ObservabilityConfig(
+        log_level=LogLevel.INFO,
+        log_format=LogFormat.CONSOLE if sys.stdout.isatty() else LogFormat.JSON,
+    ))
 
     logger.info(
         "hiperforge_user_arrancando",
