@@ -371,7 +371,17 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
             ) from e
 
     async def load_session(self, session_id: SessionId) -> Session | None:
-        """Carga un aggregate Session completo desde el storage."""
+        """
+        Carga un aggregate Session completo desde el storage.
+
+        Reconstruye el aggregate con las TurnReference reales desde la tabla
+        session_turns. Esto es necesario para que session.turn_count sea
+        correcto y el próximo turn se persista con el sequence_number correcto.
+
+        Sin este fix, session.turn_count sería 0 al restaurar (turns=[]) y el
+        primer turn nuevo tendría sequence_number=1, colisionando con los turns
+        ya existentes en la BD y siendo silenciado por INSERT OR IGNORE.
+        """
         try:
             async with self._get_conn() as db:
                 async with db.execute(
@@ -383,14 +393,51 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
                 if row is None:
                     return None
 
-                return self._row_to_session(dict(row))
+                # Cargar TurnReferences para reconstruir turn_count correctamente
+                async with db.execute(
+                    """
+                    SELECT turn_id, sequence_number, estimated_tokens,
+                           has_tool_calls, is_compacted, created_at
+                    FROM session_turns
+                    WHERE session_id = ?
+                    ORDER BY sequence_number ASC
+                    """,
+                    (session_id.to_str(),),
+                ) as cursor:
+                    turn_rows = await cursor.fetchall()
+
+            turn_refs = [self._row_to_turn_ref(dict(r)) for r in turn_rows]
+            return self._row_to_session(dict(row), turn_refs=turn_refs)
         except Exception as e:
             raise ForgeStorageError(
                 f"Error al cargar sesión {session_id.to_str()}: {e}"
             ) from e
 
-    def _row_to_session(self, row: dict[str, Any]) -> Session:
-        """Reconstruye un aggregate Session desde una fila de la BD."""
+    def _row_to_turn_ref(self, row: dict[str, Any]) -> TurnReference:
+        """Reconstruye una TurnReference desde una fila de session_turns."""
+        return TurnReference(
+            turn_id=TurnId.from_str(row["turn_id"]),
+            sequence_number=row["sequence_number"],
+            estimated_tokens=row.get("estimated_tokens", 0),
+            created_at=self._parse_dt(row["created_at"]) or datetime.now(tz=timezone.utc),
+            has_tool_calls=bool(row.get("has_tool_calls", 0)),
+            is_compacted=bool(row.get("is_compacted", 0)),
+        )
+
+    def _row_to_session(
+        self,
+        row: dict[str, Any],
+        turn_refs: list[TurnReference] | None = None,
+    ) -> Session:
+        """
+        Reconstruye un aggregate Session desde una fila de la BD.
+
+        Args:
+            row:       Fila de la tabla sessions.
+            turn_refs: TurnReferences precargadas desde session_turns.
+                       None equivale a lista vacía (solo para sesiones nuevas
+                       que aún no tienen turns en la BD).
+        """
         from src.domain.value_objects.token_budget import BUDGET_128K, BUDGET_200K
         context_window = row.get("model_context_window", 128_000)
         budget = BUDGET_200K if context_window >= 200_000 else BUDGET_128K
@@ -402,9 +449,9 @@ class SQLiteSessionStore(SQLiteStorageBase, SessionStorePort):
             status=SessionStatus(row["status"]),
             created_at=self._parse_dt(row["created_at"]) or datetime.now(tz=timezone.utc),
             last_activity=self._parse_dt(row["last_activity"]) or datetime.now(tz=timezone.utc),
-            turns=[],  # Los turns se cargan posteriormente con load_turns()
-            tasks=[],  # Las tasks se cargan posteriormente
-            artifacts=[],  # Los artifacts se cargan posteriormente
+            turns=turn_refs or [],
+            tasks=[],   # Las tasks son solo referencias estadísticas, no se usan en runtime
+            artifacts=[], # Los artifacts se cargan bajo demanda via ArtifactStore
             compacted_turns_count=row.get("compacted_turns_count", 0),
             compaction_summary=row.get("compaction_summary"),
             current_history_tokens=row.get("current_history_tokens", 0),
