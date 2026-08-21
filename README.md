@@ -1,12 +1,18 @@
-# 🚀 Orion - Agente Personal Conversacional (HiperForge User)
+# Orion — experimental local AI agent
 
-> Un agente de IA conversacional para desktop que puede planificar, razonar y ejecutar tareas locales con seguridad de nivel empresarial.
+> An experimental local agent runtime for planning and tool execution behind explicit policy controls.
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Status: MVP](https://img.shields.io/badge/Status-MVP-brightgreen)](MVP_STATUS.md)
 
 ---
+
+## Estado actual
+
+Orion is an **experimental, incomplete prototype**. Core runtime, policy, storage,
+and provider abstractions exist, but the interactive CLI, desktop client,
+approval workflows, streaming integration, and real automated test coverage are
+still incomplete. It is not production-ready.
 
 ## ✨ Características
 
@@ -76,7 +82,7 @@
 - **Domain**: Entidades, agregados, políticas (reglas de negocio)
 - **Application**: Coordinadores, orquestadores, casos de uso
 - **Infrastructure**: SQLite, LLM adapters, logging, observabilidad
-- **Interfaces**: CLI, Desktop (IPC), API
+- **Interfaces**: IPC and API foundations; CLI and desktop client are incomplete
 
 ---
 
@@ -381,27 +387,28 @@ Este proyecto está bajo licencia MIT - ver archivo [LICENSE](LICENSE) para deta
 ## 🙋 Soporte
 
 - 📖 Documentación: [docs/](docs/)
-- 🐛 Issues: [GitHub Issues](issues)
-- 💬 Discussions: [GitHub Discussions](discussions)
-- 📝 Status: [MVP_STATUS.md](MVP_STATUS.md)
+- 🐛 Issues: [GitHub Issues](https://github.com/CesarManzoCode/Orion/issues)
+- 📝 Status: [ASSESSMENT.md](ASSESSMENT.md)
 
 ---
 
 ## 🎯 Roadmap
 
-### v0.2.0 (Q2 2026)
+The roadmap has no committed delivery dates.
+
+### User-facing prototype
 - [ ] CLI completa
 - [ ] Tauri desktop app básica
 - [ ] Full streaming support
 - [ ] Approval workflows interactivos
 
-### v0.3.0 (Q3 2026)
+### Additional capabilities
 - [ ] Vision/multimodal
 - [ ] Web search integration
 - [ ] File processing
 - [ ] Advanced planning (STRIPS)
 
-### v1.0.0 (Q4 2026)
+### Production-readiness work
 - [ ] Producción-ready
 - [ ] Plugin system
 - [ ] Analytics dashboard
