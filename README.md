@@ -388,7 +388,6 @@ Este proyecto está bajo licencia MIT - ver archivo [LICENSE](LICENSE) para deta
 
 - 📖 Documentación: [docs/](docs/)
 - 🐛 Issues: [GitHub Issues](https://github.com/CesarManzoCode/Orion/issues)
-- 💬 Discussions: [GitHub Discussions](https://github.com/CesarManzoCode/Orion/discussions)
 - 📝 Status: [ASSESSMENT.md](ASSESSMENT.md)
 
 ---
